@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { canShowFloatingWebcamPreview } from "../floatingWebcamPreview";
 
 const WEBCAM_PREVIEW_DRAG_THRESHOLD = 6;
@@ -10,12 +10,14 @@ export function useWebcamPreviewOverlay({
 	showWebcamControls,
 	webcamPopoverOpen,
 	hudOverlayMousePassthroughSupported,
+	recordingWebcamStreamRef,
 }: {
 	webcamEnabled: boolean;
 	webcamDeviceId?: string;
 	showWebcamControls: boolean;
 	webcamPopoverOpen: boolean;
 	hudOverlayMousePassthroughSupported: boolean | null;
+	recordingWebcamStreamRef?: RefObject<MediaStream | null>;
 }) {
 	const [showFloatingWebcamPreview, setShowFloatingWebcamPreview] = useState(true);
 	const [webcamPreviewOffset, setWebcamPreviewOffset] = useState(DEFAULT_WEBCAM_PREVIEW_OFFSET);
@@ -209,11 +211,23 @@ export function useWebcamPreviewOverlay({
 		};
 	}, []);
 
+	const recordingStream = recordingWebcamStreamRef?.current ?? null;
+
 	useEffect(() => {
 		let mounted = true;
 
 		const startPreview = async () => {
 			if (!shouldStreamWebcamPreview) {
+				return;
+			}
+
+			// Reuse the recording stream when available — avoids opening a second
+			// getUserMedia on the same webcam which many Windows drivers reject.
+			const externalStream = recordingWebcamStreamRef?.current ?? null;
+			if (externalStream) {
+				previewStreamRef.current = externalStream;
+				attachPreviewStreamToNode(webcamPreviewRef.current);
+				attachPreviewStreamToNode(recordingWebcamPreviewRef.current);
 				return;
 			}
 
@@ -261,12 +275,16 @@ export function useWebcamPreviewOverlay({
 					videoElement.pause();
 					videoElement.srcObject = null;
 				});
-			previewStream?.getTracks().forEach((track) => track.stop());
+			// Only stop the stream if we opened it ourselves (not the recording stream).
+			const isOwnStream = previewStream && previewStream !== recordingWebcamStreamRef?.current;
+			if (isOwnStream) {
+				previewStream.getTracks().forEach((track) => track.stop());
+			}
 			if (previewStreamRef.current === previewStream) {
 				previewStreamRef.current = null;
 			}
 		};
-	}, [attachPreviewStreamToNode, shouldStreamWebcamPreview, webcamDeviceId]);
+	}, [attachPreviewStreamToNode, shouldStreamWebcamPreview, webcamDeviceId, recordingStream]);
 
 	return {
 		showFloatingWebcamPreview,

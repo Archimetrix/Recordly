@@ -154,6 +154,9 @@ export function registerSettingsHandlers() {
 						? parsed.microphoneDeviceId
 						: undefined,
 				systemAudioEnabled: parsed.systemAudioEnabled === true,
+				webcamEnabled: parsed.webcamEnabled === true,
+				webcamDeviceId:
+					typeof parsed.webcamDeviceId === "string" ? parsed.webcamDeviceId : undefined,
 			};
 		} catch {
 			return {
@@ -161,6 +164,8 @@ export function registerSettingsHandlers() {
 				microphoneEnabled: false,
 				microphoneDeviceId: undefined,
 				systemAudioEnabled: false,
+				webcamEnabled: false,
+				webcamDeviceId: undefined,
 			};
 		}
 	});
@@ -177,6 +182,8 @@ export function registerSettingsHandlers() {
 				microphoneEnabled?: boolean;
 				microphoneDeviceId?: string;
 				systemAudioEnabled?: boolean;
+				webcamEnabled?: boolean;
+				webcamDeviceId?: string;
 			},
 		) => {
 			try {

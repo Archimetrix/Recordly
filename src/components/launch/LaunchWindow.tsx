@@ -75,6 +75,7 @@ function LaunchWindowContent() {
 		setWebcamEnabled,
 		webcamDeviceId,
 		setWebcamDeviceId,
+		webcamStreamRef,
 		countdownDelay,
 		setCountdownDelay,
 		preparePermissions,
@@ -150,6 +151,7 @@ function LaunchWindowContent() {
 		showWebcamControls,
 		webcamPopoverOpen: openId === "webcam",
 		hudOverlayMousePassthroughSupported,
+		recordingWebcamStreamRef: webcamStreamRef,
 	});
 
 	useEffect(() => {

@@ -56,6 +56,7 @@ import {
 	getUpdateToastWindow,
 	hideUpdateToastWindow,
 	isHudOverlayMousePassthroughSupported,
+	isHudOverlayRecordingActive,
 	reassertHudOverlayMousePassthrough as reassertHudOverlayMouseState,
 	setHudOverlayRecordingActive,
 	showUpdateToastWindow,
@@ -136,6 +137,13 @@ async function ensureRecordingsDir() {
 // │ │ └── preload.mjs
 // │
 process.env.APP_ROOT = path.join(electronMainDir, "..");
+
+// Default to native WASAPI mic capture on Windows so the mic is embedded
+// directly in the output MP4. The WGC binary falls back to a browser-side
+// sidecar automatically if WASAPI init fails (see windowsFallbacks.ts).
+if (process.platform === "win32" && !process.env.RECORDLY_WINDOWS_MIC_CAPTURE) {
+	process.env.RECORDLY_WINDOWS_MIC_CAPTURE = "native";
+}
 
 // Use ['ENV_NAME'] avoid vite:define plugin - Vite@2.x
 export const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
@@ -260,20 +268,38 @@ function getRecordingTrayIcon() {
 function showHudOverlayFromTray() {
 	const hud = getHudOverlayWindow();
 	if (!hud) {
-		return false;
+		createWindow();
+		return true;
 	}
 
-	if (hud.isMinimized()) {
-		hud.restore();
-	}
-
-	if (process.platform === "win32" && isHudOverlayMousePassthroughSupported()) {
+	if (process.platform === "win32") {
+		if (!hud.isVisible()) {
+			if (isHudOverlayRecordingActive()) {
+				// During recording the HUD is fully interactive — safe to show directly.
+				hud.showInactive();
+				hud.moveTop();
+				return true;
+			}
+			// Idle: destroy and recreate for a guaranteed clean window state.
+			// Any show/restore/focus call on Windows can leave the window
+			// in a broken non-interactive state.
+			if (mainWindow === hud) {
+				mainWindow = null;
+			}
+			hud.once("closed", () => createWindow());
+			hud.destroy();
+			return true;
+		}
+		// Already visible — bring to top.
 		hud.showInactive();
 		hud.moveTop();
 		reassertHudOverlayMouseState();
 		return true;
 	}
 
+	if (hud.isMinimized()) {
+		hud.restore();
+	}
 	hud.show();
 	hud.moveTop();
 	hud.focus();
@@ -356,17 +382,9 @@ function focusOrCreateMainWindow() {
 			return;
 		}
 
-		// On Win32 with mouse passthrough enabled (Win11+), calling
-		// show/moveTop/focus on the transparent HUD overlay permanently corrupts
-		// setIgnoreMouseEvents forwarding, making it click-through.  Only focus
-		// the editor window; the HUD is alwaysOnTop so it doesn't need explicit
-		// focus.  On Win10 (passthrough disabled), the HUD is always interactive
-		// and can be safely shown/restored.
-		if (
-			process.platform === "win32" &&
-			!isEditorWindow(mainWindow) &&
-			isHudOverlayMousePassthroughSupported()
-		) {
+		// On Windows, always route HUD restore through showHudOverlayFromTray()
+		// which handles recreating the window for a clean interactive state.
+		if (process.platform === "win32" && !isEditorWindow(mainWindow)) {
 			showHudOverlayFromTray();
 			return;
 		}
@@ -854,6 +872,13 @@ function createEditorWindowWrapper() {
 
 		event.preventDefault();
 
+		// The HUD is alwaysOnTop which covers native dialogs. Lower it temporarily
+		// so the user can see and interact with the save/discard prompt.
+		const hud = getHudOverlayWindow();
+		if (hud && !hud.isDestroyed()) {
+			hud.setAlwaysOnTop(false);
+		}
+
 		const choice = dialog.showMessageBoxSync(editorWindow, {
 			type: "warning",
 			buttons: ["Save & Close", "Discard & Close", "Cancel"],
@@ -863,6 +888,11 @@ function createEditorWindowWrapper() {
 			message: "You have unsaved changes.",
 			detail: "Do you want to save your project before closing?",
 		});
+
+		// Restore the HUD's always-on-top after the dialog is dismissed.
+		if (hud && !hud.isDestroyed()) {
+			hud.setAlwaysOnTop(true);
+		}
 
 		if (choice === 0) {
 			editorWindow.webContents.send("request-save-before-close");

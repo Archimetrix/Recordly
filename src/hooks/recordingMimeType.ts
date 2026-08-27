@@ -1,9 +1,15 @@
 const RECORDING_MIME_TYPE_PREFERENCES = [
-	"video/webm;codecs=h264",
+	// MP4+H.264 is both recordable and playable in Electron on Windows.
+	// h264 inside a WebM container can be recorded but Chromium won't play it back.
+	"video/mp4;codecs=avc1.42E01E",
+	"video/mp4;codecs=avc1",
+	"video/mp4;codecs=h264",
+	"video/mp4",
 	"video/webm;codecs=vp9",
 	"video/webm",
 	"video/webm;codecs=vp8",
 	"video/webm;codecs=av1",
+	"video/webm;codecs=h264",
 ] as const;
 
 const WEBCAM_RECORDING_MIME_TYPE_PREFERENCES = [

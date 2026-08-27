@@ -454,7 +454,7 @@ export function registerRecordingHandlers(
 
 					const config: Record<string, unknown> = {
 						outputPath: tempVideoPath,
-						fps: 60,
+						fps: 30,
 					};
 
 					if (captureTarget.kind === "invalid-window") {
@@ -1392,6 +1392,9 @@ export function registerRecordingHandlers(
 
 		try {
 			const { paths, startDelayMsByPath } = await getCompanionAudioFallbackInfo(videoPath);
+			console.log("[audio-fallback] videoPath:", videoPath);
+			console.log("[audio-fallback] paths:", paths);
+			console.log("[audio-fallback] startDelayMsByPath:", startDelayMsByPath);
 			await Promise.all([
 				rememberApprovedLocalReadPath(videoPath),
 				...paths.map((fallbackPath) => rememberApprovedLocalReadPath(fallbackPath)),

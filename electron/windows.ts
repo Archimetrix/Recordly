@@ -128,12 +128,15 @@ function getWindowsBuildNumber(): number | null {
 }
 
 export function isHudOverlayMousePassthroughSupported(): boolean {
-	if (process.platform === "linux") {
+	// Passthrough mode (setIgnoreMouseEvents with forward:true) is permanently
+	// unreliable on Windows — show/moveTop/focus all corrupt the WS_EX_TRANSPARENT
+	// flag and it cannot be reliably restored. Use the compact opaque bar instead;
+	// setContentProtection keeps it hidden from screen recordings.
+	if (process.platform === "win32") {
 		return false;
 	}
 
-	const build = getWindowsBuildNumber();
-	if (build !== null && build < 22000) {
+	if (process.platform === "linux") {
 		return false;
 	}
 
@@ -217,7 +220,13 @@ function applyHudOverlayBounds() {
 	if (!hudOverlayWindow.isVisible()) {
 		return;
 	}
-	hudOverlayWindow.moveTop();
+	// On Windows, alwaysOnTop:true keeps the bar above normal windows without
+	// moveTop(). Calling moveTop() on a focusable window can trigger focus/
+	// activation changes that cause visible flickering. On macOS/Linux use it
+	// to raise above other alwaysOnTop windows.
+	if (process.platform !== "win32") {
+		hudOverlayWindow.moveTop();
+	}
 }
 
 function getUpdateToastBounds() {
@@ -281,7 +290,7 @@ function setHudOverlayFallbackExpanded(expanded: boolean) {
 	);
 	hudOverlayWindow.setBounds(nextBounds, false);
 	positionUpdateToastWindow();
-	if (hudOverlayWindow.isVisible()) {
+	if (hudOverlayWindow.isVisible() && process.platform !== "win32") {
 		hudOverlayWindow.moveTop();
 	}
 }
@@ -375,10 +384,13 @@ ipcMain.on("hud-overlay-drag", (_event, phase: string, screenX: number, screenY:
 		}
 
 		hudDragLastCursor = { x: screenX, y: screenY };
-		const targetX = Math.round(screenX - hudDragOffset.x);
-		const targetY = Math.round(screenY - hudDragOffset.y);
 		const fixedWidth = hudDragFixedSize?.width ?? hudOverlayWindow.getBounds().width;
 		const fixedHeight = hudDragFixedSize?.height ?? hudOverlayWindow.getBounds().height;
+		const rawX = Math.round(screenX - hudDragOffset.x);
+		const rawY = Math.round(screenY - hudDragOffset.y);
+		const { workArea } = getScreen().getDisplayMatching({ x: rawX, y: rawY, width: fixedWidth, height: fixedHeight });
+		const targetX = Math.max(workArea.x, Math.min(workArea.x + workArea.width - fixedWidth, rawX));
+		const targetY = Math.max(workArea.y, Math.min(workArea.y + workArea.height - fixedHeight, rawY));
 		hudOverlayWindow.setBounds(
 			{
 				x: targetX,
@@ -400,7 +412,9 @@ ipcMain.on("hud-overlay-drag", (_event, phase: string, screenX: number, screenY:
 
 ipcMain.on("hud-overlay-hide", () => {
 	if (hudOverlayWindow && !hudOverlayWindow.isDestroyed()) {
-		hudOverlayWindow.minimize();
+		// Use hide() instead of minimize() so restore() is never called.
+		// On Windows 11+, restore() corrupts setIgnoreMouseEvents forwarding.
+		hudOverlayWindow.hide();
 	}
 });
 
@@ -471,7 +485,10 @@ export function createHudOverlayWindow(): BrowserWindow {
 		skipTaskbar: true,
 		hasShadow: false,
 		show: false,
-		focusable: false,
+		// On Windows in compact-bar mode (passthrough disabled) the window must be
+		// focusable so Windows delivers mouse click events reliably. On macOS/Linux
+		// (full-screen passthrough overlay) keep non-focusable to avoid stealing focus.
+		focusable: process.platform === "win32" ? !isHudOverlayMousePassthroughSupported() : false,
 		webPreferences: {
 			preload: path.join(electronWindowsDir, "preload.mjs"),
 			nodeIntegration: false,
@@ -486,15 +503,22 @@ export function createHudOverlayWindow(): BrowserWindow {
 			return;
 		}
 		hasShownHudWindow = true;
-		win.show();
-		win.moveTop();
 		if (process.platform === "win32" && isHudOverlayMousePassthroughSupported()) {
+			// show() and moveTop() both permanently corrupt setIgnoreMouseEvents
+			// forwarding on Win11+. Use showInactive() only — alwaysOnTop handles
+			// z-order so moveTop() is unnecessary.
+			win.showInactive();
 			win.setIgnoreMouseEvents(false);
 			setTimeout(() => {
 				if (!win.isDestroyed()) {
 					setHudOverlayMousePassthrough(hudOverlayIgnoringMouse);
 				}
-			}, 50);
+			}, 100);
+		} else {
+			// alwaysOnTop:true already keeps the bar on top; moveTop() is
+			// unnecessary and can trigger focus-related side effects on Windows.
+			win.show();
+			win.setIgnoreMouseEvents(false);
 		}
 	};
 
@@ -519,7 +543,7 @@ export function createHudOverlayWindow(): BrowserWindow {
 	// the flag off then back on so the native WS_EX_TRANSPARENT flag is fully reset.
 	// On Windows 10 (build < 22000) passthrough is disabled entirely, so skip this.
 	if (process.platform === "win32" && isHudOverlayMousePassthroughSupported()) {
-		win.on("focus", () => {
+		const reassertPassthrough = () => {
 			if (!win.isDestroyed()) {
 				win.setIgnoreMouseEvents(false);
 				setTimeout(() => {
@@ -528,7 +552,12 @@ export function createHudOverlayWindow(): BrowserWindow {
 					}
 				}, 50);
 			}
-		});
+		};
+		win.on("focus", reassertPassthrough);
+		// showInactive() (used on Win11 to restore without stealing focus) does not
+		// fire "focus", so also reassert on "restore" and "show" to cover that path.
+		win.on("restore", reassertPassthrough);
+		win.on("show", reassertPassthrough);
 	}
 
 	win.webContents.on("did-finish-load", () => {
@@ -655,6 +684,10 @@ export function reassertHudOverlayMousePassthrough(): void {
 			setHudOverlayMousePassthrough(hudOverlayIgnoringMouse);
 		}
 	}, 50);
+}
+
+export function isHudOverlayRecordingActive(): boolean {
+	return hudOverlayRecordingActive;
 }
 
 export function setHudOverlayRecordingActive(recording: boolean): void {

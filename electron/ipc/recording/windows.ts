@@ -1,7 +1,12 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { BrowserWindow } from "electron";
+import { getFfmpegBinaryPath } from "../ffmpeg/binary";
 import { getWindowsCaptureExePath } from "../paths/binaries";
 import {
 	selectedSource,
@@ -18,6 +23,8 @@ import {
 } from "../types";
 import { moveFileWithOverwrite } from "../utils";
 import { emitRecordingInterrupted } from "./events";
+
+const execFileAsync = promisify(execFile);
 
 const WINDOWS_CAPTURE_STOP_TIMEOUT_MS = 45_000;
 
@@ -208,49 +215,92 @@ export async function muxNativeWindowsVideoWithAudio(
 
 	const videoPathWithoutExt = videoPath.replace(/\.[^.]+$/u, "");
 
-	// Optimization: instead of heavy FFmpeg muxing, we just move the audio sidecars
-	// to their final companion paths so the editor can find them as separate tracks.
-	if (systemAudioPath) {
-		const finalSystemPath = `${videoPathWithoutExt}.system.wav`;
-		try {
-			const stat = await fs.stat(systemAudioPath);
-			if (stat.size > 0) {
-				if (systemAudioPath !== finalSystemPath) {
-					await moveFileWithOverwrite(systemAudioPath, finalSystemPath);
-				}
-				audioInputs.push("system");
-				audio.system = {
-					path: finalSystemPath,
-					sizeBytes: stat.size,
-					durationSeconds: 0,
-					startDelayMs: null,
-					adjustment: { mode: "none", delayMs: 0, tempoRatio: 1, durationDeltaMs: 0 },
-				};
-			}
-		} catch (err) {
-			console.error(`[mux-win] Failed to handle system audio:`, err);
-		}
-	}
+	// Collect audio inputs that have usable data.
+	const audioInputFiles: { type: "mic" | "system"; inputPath: string }[] = [];
 
 	if (micAudioPath) {
-		const finalMicPath = `${videoPathWithoutExt}.mic.wav`;
 		try {
 			const stat = await fs.stat(micAudioPath);
 			if (stat.size > 0) {
-				if (micAudioPath !== finalMicPath) {
-					await moveFileWithOverwrite(micAudioPath, finalMicPath);
+				audioInputFiles.push({ type: "mic", inputPath: micAudioPath });
+			}
+		} catch { /* missing file — skip */ }
+	}
+
+	if (systemAudioPath) {
+		try {
+			const stat = await fs.stat(systemAudioPath);
+			if (stat.size > 0) {
+				audioInputFiles.push({ type: "system", inputPath: systemAudioPath });
+			}
+		} catch { /* missing file — skip */ }
+	}
+
+	if (audioInputFiles.length > 0) {
+		// Mux audio directly into the MP4. Video stream is stream-copied (no
+		// re-encode) so this is fast even for large files — only audio is encoded.
+		const ffmpegPath = getFfmpegBinaryPath();
+		const tmpOutput = path.join(os.tmpdir(), `recordly-mux-${Date.now()}.mp4`);
+
+		try {
+			const ffmpegArgs = [
+				"-y",
+				"-i", videoPath,
+				...audioInputFiles.flatMap(({ inputPath }) => ["-i", inputPath]),
+				"-c:v", "copy",
+				"-c:a", "aac",
+				"-b:a", "192k",
+				"-map", "0:v:0",
+				// Mix all audio inputs into a single stereo track.
+				...(audioInputFiles.length > 1
+					? ["-filter_complex", `amix=inputs=${audioInputFiles.length}:duration=first[amix]`, "-map", "[amix]"]
+					: ["-map", "1:a:0"]),
+				"-movflags", "+faststart",
+				tmpOutput,
+			];
+
+			console.log("[mux-win] Running ffmpeg mux:", ffmpegArgs.join(" "));
+			await execFileAsync(ffmpegPath, ffmpegArgs, {
+				timeout: 30 * 60 * 1000,
+				maxBuffer: 100 * 1024 * 1024,
+			});
+
+			await moveFileWithOverwrite(tmpOutput, videoPath);
+			console.log("[mux-win] Mux complete — audio embedded in MP4");
+
+			for (const { type, inputPath } of audioInputFiles) {
+				audioInputs.push(type);
+				const stat = await fs.stat(videoPath);
+				audio[type] = {
+					path: videoPath,
+					sizeBytes: stat.size,
+					durationSeconds: 0,
+					startDelayMs: null,
+					adjustment: { mode: "none", delayMs: 0, tempoRatio: 1, durationDeltaMs: 0 },
+				};
+				// Remove the now-redundant sidecar files.
+				fs.rm(inputPath, { force: true }).catch(() => undefined);
+				fs.rm(`${inputPath}.json`, { force: true }).catch(() => undefined);
+			}
+		} catch (err) {
+			console.error("[mux-win] ffmpeg mux failed, keeping sidecars:", err);
+			fs.rm(tmpOutput, { force: true }).catch(() => undefined);
+			// Fall back: keep sidecar files at their final companion paths.
+			for (const { type, inputPath } of audioInputFiles) {
+				const finalPath = `${videoPathWithoutExt}.${type}.wav`;
+				if (inputPath !== finalPath) {
+					await moveFileWithOverwrite(inputPath, finalPath).catch(() => undefined);
 				}
-				audioInputs.push("mic");
-				audio.mic = {
-					path: finalMicPath,
+				audioInputs.push(type);
+				const stat = await fs.stat(finalPath).catch(() => ({ size: 0 }));
+				audio[type] = {
+					path: finalPath,
 					sizeBytes: stat.size,
 					durationSeconds: 0,
 					startDelayMs: null,
 					adjustment: { mode: "none", delayMs: 0, tempoRatio: 1, durationDeltaMs: 0 },
 				};
 			}
-		} catch (err) {
-			console.error(`[mux-win] Failed to handle mic audio:`, err);
 		}
 	}
 
@@ -259,11 +309,11 @@ export async function muxNativeWindowsVideoWithAudio(
 	);
 
 	return {
-		muxed: false,
-		videoDurationSeconds: 0, // No longer needed here
+		muxed: audioInputs.length > 0,
+		videoDurationSeconds: 0,
 		muxTimeoutMs: 0,
 		audioInputs,
 		audio,
-		keptAudioSidecars: true,
+		keptAudioSidecars: false,
 	};
 }
